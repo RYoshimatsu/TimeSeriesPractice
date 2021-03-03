@@ -1,0 +1,627 @@
+---
+title: "Time Series Practice"
+author: "Ryuta Yoshimatsu"
+output:
+  html_document: 
+    number_sections: true
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Basic Approach for Time Series Analysis
+
+## Load Data
+
+## Create and Plot Time Series
+
+Check for a trend and a seasonal variation (peaks and troughs). Check if the time series could be described using an additive model or a multiplicative model. For an additive model, look if the seasonal fluctuations and the random fluctuations are roughly constant in size over time. If an additive model is not appropriate (the size of the seasonal fluctuations and random fluctuations seem to vary with the level of the time series), transform the series (e.g. natural log) to get a series that can be described using an additive model. 
+
+## Decompose Time Series
+
+Decompose a time series into its constituent components (deterministic and stochastic parts). 
+
+For non-seasonal series, decompose the series into trend and residuals. Use additive filters (e.g. moving average), parametric models (e.g. linear regression), non-parametric models (e.g. loess) or flexible models (e.g. generalized additive model) to estimate the trend.
+
+For seasonal series, use decompose(ts) function with a well defined frequency or frequencies. Other methods for estimating the seasonal components include differentiation by `s` and then plotting to confirm constant mean and variance or running any of the stationary tests.  
+
+## Holt-Winters Models: Exponential Smoothing
+## ARIMA / SARIMA Models
+## Generalized Linear Regression
+
+
+# Load Libraries
+```{r packages, message = FALSE}
+library(statsr)
+library(dplyr)
+library(ggplot2)
+library(devtools)
+library(tidyverse)
+library(knitr)
+library(forecast)
+library(nlme)
+library(TTR)
+```
+
+# Helper Function
+
+```{r}
+# Function to plot Normal QQ
+qqplot.data <- function (vec) # argument: vector of numbers
+{
+  y <- quantile(vec[!is.na(vec)], c(0.25, 0.75))
+  x <- qnorm(c(0.25, 0.75))
+  slope <- diff(y)/diff(x)
+  int <- y[1L] - slope * x[1L]
+  d <- data.frame(resids = vec)
+  ggplot(d, aes(sample = resids)) + stat_qq() + geom_abline(slope = slope, intercept = int) + xlab("Theoretical Quantiles") + ylab("Sample Quantiles")
+}
+```
+
+# Souvenir Time Series
+
+## Load Data
+
+```{r}
+# Load data
+souvenir <- scan("http://robjhyndman.com/tsdldata/data/fancy.dat")
+```
+
+## Create and Plot Time Series
+
+```{r, fig.width=5.0, fig.height=5.0}
+# Create time series object
+souvenirtimeseries <- ts(souvenir, frequency=12, start=c(1987,1))
+
+# Plot time series
+plot(souvenirtimeseries)
+```
+
+One can observe a positive slope in the trend and clear seasonality. The residuals after de-trending and de-seasonalizing (done mentally), would exhibit variance that increases with time. Thus, the series as of now can not be represented using an additive model. We will transform the series.
+
+## Clean / Preprocess / Transform Time Series
+
+```{r, fig.width=5.0, fig.height=5.0}
+# Transform
+souvenir.log <- log(souvenir)
+
+# Create time series object
+souvenirtimeseries.log <- ts(souvenir.log, frequency=12, start=c(1987,1))
+
+# Plot time series
+plot(souvenirtimeseries.log)
+
+# Show series
+souvenirtimeseries.log
+```
+
+## Decompose Time Series
+
+```{r, fig.width=5.0, fig.height=5.0}
+# Decompose time series
+souvenirtimeseries.log.components <- decompose(souvenirtimeseries.log)
+
+# Plot
+plot(souvenirtimeseries.log.components)
+```
+
+Decomposition of the transformed series shows a clear trend and a seasonality. The next step will be to specify the lag dependent structure of the random term. 
+
+## Holt-Winters Models: Exponential Smoothing
+
+### Fit
+
+```{r, fig.width=5, fig.height=5}
+# Model using Holt-Winters Smoothing
+souvenirtimeseries.log.hw <- HoltWinters(souvenirtimeseries.log)
+
+# Model specification
+souvenirtimeseries.log.hw
+
+# Plot interpolation
+plot(souvenirtimeseries.log.hw)
+```
+
+### Forecast
+
+```{r, fig.width=5, fig.height=5}
+# Forecast using Holt-Winters Smoothing
+souvenirtimeseries.log.forecasts.hw <- forecast:::forecast.HoltWinters(souvenirtimeseries.log.hw, h=48)
+
+# Plot forecasts
+forecast:::plot.forecast(souvenirtimeseries.log.forecasts.hw)
+```
+
+### Residual Analysis
+
+To test whether there is significant evidence for non-zero correlations in the residuals of the fit, we carry out a Ljung-Box test and check if the distribution of the residuals is roughly normal.
+
+```{r, fig.width=5, fig.height=5}
+# Plot residuals
+na.omit(souvenirtimeseries.log.forecasts.hw$residuals) %>% ggtsdisplay(lag.max=20, main='Residual', theme=theme_bw())
+
+# Run Ljung-Box test (null hypothesis: there is no non-zero autocorrelation in the in-sample forecast errors)
+Box.test(souvenirtimeseries.log.forecasts.hw$residuals, lag=20, type="Ljung-Box")
+
+# Plot histogram of residuals
+ggplot() + aes(as.numeric(na.omit(souvenirtimeseries.log.forecasts.hw$residuals)))+geom_histogram(aes(y=..density..), bins=30, alpha=0.75, color='blue', fill='blue') + geom_density()
+
+# Plot quantile-quantile plot
+qqplot.data(as.numeric(na.omit(souvenirtimeseries.log.forecasts.hw$residuals)))
+```
+
+## ARIMA / SARIMA Models
+
+### Model Selection ARIMA(p,d,q)(P,D,Q) and Fit
+
+```{r, fig.height=5, fig.width=5}
+# Perform seasonal differentiation with lag 12
+souvenirtimeseries.log.deseasonalized <- souvenirtimeseries.log %>% diff(lag=12)
+ggtsdisplay(souvenirtimeseries.log.deseasonalized, main='', theme=theme_bw())
+Box.test(souvenirtimeseries.log.deseasonalized, lag=20, type="Ljung-Box")
+
+# Find the orders for the seasonal and non-seasonal parts -> use ACF for MA(q) and PACF for AR(p)
+# BIC: ARIMA(2,0,0)(0,1,1)[12] with drift
+# AIC: ARIMA(2,0,0)(0,1,2)[12] with drift
+souvenirtimeseries.log.arima <- auto.arima(souvenirtimeseries.log, max.p=10, max.q=10, stationary=FALSE, seasonal=TRUE, ic="aic", stepwise=FALSE)
+souvenirtimeseries.log.arima
+```
+
+### Forecast
+
+```{r, fig.height=5, fig.width=5}
+souvenirtimeseries.log.forecasts.arima <- souvenirtimeseries.log.arima %>% forecast(h=48) %>% autoplot()
+souvenirtimeseries.log.forecasts.arima
+```
+
+### Residual Analysis
+
+```{r, fig.height=5, fig.width=5}
+checkresiduals(souvenirtimeseries.log.arima)
+```
+
+## Generalized Linear Regression
+
+### Prepare Data Frame
+
+```{r}
+num.resp <- as.numeric(souvenirtimeseries.log)
+num.time <- as.numeric(time(num.resp))
+mn01 <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun")
+mn02 <- c("Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+month <- factor(cycle(souvenirtimeseries.log), labels=c(mn01, mn02))
+dat <- data.frame(resp=num.resp, time=num.time, month)
+```
+
+### Fit GLS
+
+```{r, fig.height=3.5, fig.width=3.5}
+corStruct <- corARMA(form = ~ time, p=2, q=0)
+souvenirtimeseries.log.fit.gls <- gls(resp ~ time + month, data=dat, corr=corStruct)
+ggplot(dat, aes(x=time)) + geom_line(aes(y=resp), color="black") + geom_line(aes(y=souvenirtimeseries.log.fit.gls$fitted), color="red") 
+```
+
+### Resdiaul Analysis
+
+```{r, fig.width=5, fig.height=5}
+# Plot residuals
+na.omit(souvenirtimeseries.log.fit.gls$residuals) %>% ggtsdisplay(lag.max=20, main='Residual', theme=theme_bw())
+
+# Run Ljung-Box test (null hypothesis: there is no non-zero autocorrelation in the in-sample forecast errors)
+Box.test(souvenirtimeseries.log.fit.gls$residuals, lag=20, type="Ljung-Box")
+
+# Plot histogram of residuals
+ggplot()+aes(as.numeric(na.omit(souvenirtimeseries.log.fit.gls$residuals)))+geom_histogram(aes(y=..density..), bins=30, alpha=0.75, color='blue', fill='blue') + geom_density()
+
+# Plot quantile-quantile plot
+qqplot.data(as.numeric(na.omit(souvenirtimeseries.log.fit.gls$residuals)))
+```
+
+## Compare SSE
+
+```{r}
+length.hw <- length(souvenirtimeseries.log.hw$x)
+length.arima <- length(souvenirtimeseries.log.arima$residuals)
+length.gls <- length(souvenirtimeseries.log.fit.gls$residuals)
+
+length.hw
+length.arima
+length.gls
+
+cat("ES:\t", souvenirtimeseries.log.hw$SSE, "\n")
+cat("ARIMA:\t", sum(souvenirtimeseries.log.arima$residuals^2), "\n")
+cat("GLS:\t", sum(souvenirtimeseries.log.fit.gls$residuals^2), "\n")
+```
+
+
+# Kings Time Series
+
+## Load Data
+```{r}
+kings <- scan("http://robjhyndman.com/tsdldata/misc/kings.dat", skip=3)
+```
+
+## Create and Plot Time Series
+
+```{r, fig.width=5, fig.height=5}
+kings <- ts(kings)
+kings %>% ggtsdisplay(main='', theme=theme_bw())
+```
+
+## Decompose Time Series (Non-seasonal)
+
+```{r, fig.width=5, fig.height=5}
+kings.sma <- SMA(kings, n=8)
+plot.ts(kings.sma)
+```
+
+## Holt-Winters Models: Exponential Smoothing
+
+```{r, fig.width=5, fig.height=5}
+# Fit
+kings.hw <- HoltWinters(kings, gamma=FALSE)
+kings.hw
+plot(kings.hw)
+
+# Forecast using Holt-Winters Smoothing
+kings.forecasts.hw <- forecast:::forecast.HoltWinters(kings.hw, h=10)
+
+# Plot forecasts
+forecast:::plot.forecast(kings.forecasts.hw)
+
+# Plot residuals
+na.omit(kings.forecasts.hw$residuals) %>% ggtsdisplay(lag.max=20, main='Residual', theme=theme_bw())
+
+# Run Ljung-Box test (null hypothesis: there is no non-zero autocorrelation in the in-sample forecast errors)
+Box.test(kings.forecasts.hw$residuals, lag=20, type="Ljung-Box")
+
+# Plot histogram of residuals
+ggplot()+aes(as.numeric(na.omit(kings.forecasts.hw$residuals)))+geom_histogram(aes(y=..density..), bins=30, alpha=0.75, color='blue', fill='blue') + geom_density()
+
+# Plot quantile-quantile plot
+qqplot.data(as.numeric(na.omit(kings.forecasts.hw$residuals)))
+```
+
+## ARIMA Models
+
+```{r, fig.width=5, fig.height=5}
+kings.detrend <- kings %>% diff(lag=1)
+ggtsdisplay(kings.detrend, main='d=1', theme=theme_bw())
+Box.test(kings.detrend, lag=20, type="Ljung-Box")
+
+# BIC: ARIMA(0,1,1)
+# AIC: ARIMA(0,1,1)
+kings.arima <- auto.arima(kings, max.p=10, max.q=10, stationary=FALSE, seasonal=FALSE, ic="bic", stepwise=FALSE)
+kings.arima
+
+kings.fit.arima <- arima(kings, order=c(0,1,1))
+kings.forecasts.arima <- kings.fit.arima %>% forecast(h=10) %>% autoplot()
+kings.forecasts.arima
+
+checkresiduals(kings.fit.arima)
+```
+
+## Generalized Linear Regression
+
+```{r, fig.width=5, fig.height=5}
+num.resp <- as.numeric(kings)
+num.time <- as.numeric(time(num.resp))
+dat <- data.frame(resp=num.resp, time=num.time)
+
+corStruct <- corARMA(form = ~ time, p=0, q=1)
+kings.fit.gls <- gls(resp ~ time, data=dat, corr=corStruct)
+ggplot(dat, aes(x=time)) + geom_line(aes(y=resp), color="black") + geom_line(aes(y=kings.fit.gls$fitted), color="red") 
+
+# Plot residuals
+na.omit(kings.fit.gls$residuals) %>% ggtsdisplay(lag.max=20, main='Residual', theme=theme_bw())
+
+# Run Ljung-Box test (null hypothesis: there is no non-zero autocorrelation in the in-sample forecast errors)
+Box.test(kings.fit.gls$residuals, lag=20, type="Ljung-Box")
+
+# Plot histogram of residuals
+ggplot()+aes(as.numeric(na.omit(kings.fit.gls$residuals)))+geom_histogram(aes(y=..density..), bins=30, alpha=0.75, color='blue', fill='blue') + geom_density()
+
+# Plot quantile-quantile plot
+qqplot.data(as.numeric(na.omit(kings.fit.gls$residuals)))
+```
+
+## Compare SSE
+
+```{r}
+length.hw <- length(kings.hw$x)
+length.arima <- length(kings.arima$residuals)
+length.gls <- length(kings.fit.gls$residuals)
+
+length.hw
+length.arima
+length.gls
+
+cat("ES:\t", kings.hw$SSE, "\n")
+cat("ARIMA:\t", sum(kings.arima$residuals^2), "\n")
+cat("GLS:\t", sum(kings.fit.gls$residuals^2), "\n")
+```
+
+# NY Births Time Series
+
+##Load Data
+
+```{r, fig.width=5, fig.height=5}
+births <- scan("http://robjhyndman.com/tsdldata/data/nybirths.dat")
+births <- ts(births, frequency = 12, start = c(1946, 1))
+births %>% ggtsdisplay(main='', theme=theme_bw())
+```
+
+## Decompose Time Series
+
+```{r, fig.width=5.0, fig.height=5.0}
+births.components <- decompose(births)
+plot(births.components)
+```
+
+## Holt-Winters Models: Exponential Smoothing
+
+```{r, fig.width=5, fig.height=5}
+# Fit
+births.hw <- HoltWinters(births)
+births.hw
+plot(births.hw)
+
+# Forecast using Holt-Winters Smoothing
+births.forecasts.hw <- forecast:::forecast.HoltWinters(births.hw, h=48)
+
+# Plot forecasts
+forecast:::plot.forecast(births.forecasts.hw)
+
+# Plot residuals
+na.omit(births.forecasts.hw$residuals) %>% ggtsdisplay(lag.max=20, main='Residual', theme=theme_bw())
+
+# Run Ljung-Box test (null hypothesis: there is no non-zero autocorrelation in the in-sample forecast errors)
+Box.test(births.forecasts.hw$residuals, lag=20, type="Ljung-Box")
+
+# Plot histogram of residuals
+ggplot()+aes(as.numeric(na.omit(births.forecasts.hw$residuals)))+geom_histogram(aes(y=..density..), bins=30, alpha=0.75, color='blue', fill='blue') + geom_density()
+
+# Plot quantile-quantile plot
+qqplot.data(as.numeric(na.omit(births.forecasts.hw$residuals)))
+```
+
+## ARIMA / SARIMA Models
+
+```{r, fig.width=5, fig.height=5}
+births.deseasonalized <- births %>% diff(lag=12) %>% diff(lag=1)
+ggtsdisplay(births.deseasonalized, main='d=1', theme=theme_bw())
+Box.test(births.deseasonalized, lag=20, type="Ljung-Box")
+
+# AIC: ARIMA(2,1,1)(1,1,1)[12]
+# BIC: ARIMA(2,1,1)(1,1,1)[12]
+births.arima <- auto.arima(births, max.p=10, max.q=10, stationary=FALSE, seasonal=TRUE, ic="aic", stepwise=FALSE)
+births.arima
+
+births.fit.arima <- arima(births, order=c(2,1,1), seasonal=c(1,1,1))
+births.forecasts.arima <- births.fit.arima %>% forecast(h=48) %>% autoplot()
+births.forecasts.arima
+
+checkresiduals(births.fit.arima)
+```
+
+## Generalized Linear Regression
+
+```{r, fig.width=5, fig.height=5}
+num.resp <- as.numeric(births)
+num.time <- as.numeric(time(num.resp))
+mn01 <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun")
+mn02 <- c("Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+month <- factor(cycle(births), labels=c(mn01, mn02))
+dat <- data.frame(resp=num.resp, time=num.time, month)
+
+corStruct <- corARMA(form = ~ time, p=0, q=1)
+births.fit.gls <- gls(resp ~ time + month, data=dat, corr=corStruct)
+ggplot(dat, aes(x=time)) + geom_line(aes(y=resp), color="black") + geom_line(aes(y=births.fit.gls$fitted), color="red") 
+
+# Plot residuals
+na.omit(births.fit.gls$residuals) %>% ggtsdisplay(lag.max=20, main='Residual', theme=theme_bw())
+
+# Run Ljung-Box test (null hypothesis: there is no non-zero autocorrelation in the in-sample forecast errors)
+Box.test(births.fit.gls$residuals, lag=20, type="Ljung-Box")
+
+# Plot histogram of residuals
+ggplot() + aes(as.numeric(na.omit(births.fit.gls$residuals))) + geom_histogram(aes(y=..density..), bins=30, alpha=0.75, color='blue', fill='blue') + geom_density()
+
+# Plot quantile-quantile plot
+qqplot.data(as.numeric(na.omit(births.fit.gls$residuals)))
+```
+
+## Compare SSE
+
+```{r}
+length.hw <- length(births.hw$x)
+length.arima <- length(births.arima$residuals)
+length.gls <- length(births.fit.gls$residuals)
+
+length.hw
+length.arima
+length.gls
+
+cat("ES:\t", births.hw$SSE, "\n")
+cat("ARIMA:\t", sum(births.arima$residuals^2), "\n")
+cat("GLS:\t", sum(births.fit.gls$residuals^2), "\n")
+```
+
+
+# Rain Time Series
+
+##Load Data
+
+```{r}
+rain <- scan("http://robjhyndman.com/tsdldata/hurst/precip1.dat", skip=1)
+```
+
+## Create and Plot Time Series
+
+```{r, fig.width=5, fig.height=5}
+rain <- ts(rain, start=c(1813))
+rain %>% ggtsdisplay(main='', theme=theme_bw())
+Box.test(rain, lag=20, type="Ljung-Box")
+```
+
+## Holt-Winters Models: Exponential Smoothing
+
+```{r, fig.width=5, fig.height=5}
+# Fit
+rain.hw <- HoltWinters(rain, beta=FALSE, gamma=FALSE)
+rain.hw
+plot(rain.hw)
+
+# Forecast using Holt-Winters Smoothing
+rain.forecasts.hw <- forecast:::forecast.HoltWinters(rain.hw, h=10)
+
+# Plot forecasts
+forecast:::plot.forecast(rain.forecasts.hw)
+
+# Plot residuals
+na.omit(rain.forecasts.hw$residuals) %>% ggtsdisplay(lag.max=20, main='Residual', theme=theme_bw())
+
+# Run Ljung-Box test (null hypothesis: there is no non-zero autocorrelation in the in-sample forecast errors)
+Box.test(rain.forecasts.hw$residuals, lag=20, type="Ljung-Box")
+
+# Plot histogram of residuals
+ggplot()+aes(as.numeric(na.omit(rain.forecasts.hw$residuals)))+geom_histogram(aes(y=..density..), bins=30, alpha=0.75, color='blue', fill='blue') + geom_density()
+
+# Plot quantile-quantile plot
+qqplot.data(as.numeric(na.omit(rain.forecasts.hw$residuals)))
+```
+
+# Skirts Time Series
+
+##Load Data
+
+```{r}
+skirts <- scan("http://robjhyndman.com/tsdldata/roberts/skirts.dat", skip=5)
+```
+
+## Create and Plot Time Series
+
+```{r, fig.width=5, fig.height=5}
+skirts <- ts(skirts, start=c(1866))
+skirts %>% ggtsdisplay(main='', theme=theme_bw())
+Box.test(skirts, lag=20, type="Ljung-Box")
+```
+
+## Decompose Time Series
+
+```{r, fig.width=5, fig.height=5}
+skirts.sma <- SMA(skirts, n=5)
+plot.ts(skirts.sma)
+```
+
+## Holt-Winters Models: Exponential Smoothing
+
+```{r, fig.width=5, fig.height=5}
+# Fit
+skirts.hw <- HoltWinters(skirts, beta=TRUE, gamma=FALSE)
+skirts.hw
+plot(skirts.hw)
+
+# Forecast using Holt-Winters Smoothing
+skirts.forecasts.hw <- forecast:::forecast.HoltWinters(skirts.hw, h=10)
+
+# Plot forecasts
+forecast:::plot.forecast(skirts.forecasts.hw)
+
+# Plot residuals
+na.omit(skirts.forecasts.hw$residuals) %>% ggtsdisplay(lag.max=20, main='Residual', theme=theme_bw())
+
+# Run Ljung-Box test (null hypothesis: there is no non-zero autocorrelation in the in-sample forecast errors)
+Box.test(skirts.forecasts.hw$residuals, lag=20, type="Ljung-Box")
+
+# Plot histogram of residuals
+ggplot()+aes(as.numeric(na.omit(skirts.forecasts.hw$residuals)))+geom_histogram(aes(y=..density..), bins=30, alpha=0.75, color='blue', fill='blue') + geom_density()
+
+# Plot quantile-quantile plot
+qqplot.data(as.numeric(na.omit(skirts.forecasts.hw$residuals)))
+```
+
+## ARIMA / SARIMA Models
+
+```{r, fig.width=5, fig.height=5}
+skirts.deseasonalized <- skirts %>% diff(lag=1) %>% diff(lag=1)
+ggtsdisplay(skirts.deseasonalized, main='d=2', theme=theme_bw())
+Box.test(skirts.deseasonalized, lag=20, type="Ljung-Box")
+
+# AIC: ARIMA(5,2,0)
+# BIC: ARIMA(1,2,0)
+skirts.arima <- auto.arima(skirts, max.p=10, max.q=10, stationary=FALSE, seasonal=FALSE, ic="aic", stepwise=FALSE)
+skirts.arima
+
+skirts.fit.arima <- arima(skirts, order=c(1,2,0))
+skirts.forecasts.arima <- skirts.fit.arima %>% forecast(h=10) %>% autoplot()
+skirts.forecasts.arima
+
+checkresiduals(skirts.fit.arima)
+```
+
+# Volcano Dusts Time Series 
+
+##Load Data
+
+```{r}
+volcanodust <- scan("http://robjhyndman.com/tsdldata/annual/dvi.dat", skip=1)
+```
+
+## Create and Plot Time Series
+
+```{r, fig.width=5, fig.height=5}
+volcanodust <- ts(volcanodust, start=c(1500))
+volcanodust %>% ggtsdisplay(main='', theme=theme_bw())
+Box.test(volcanodust, lag=20, type="Ljung-Box")
+```
+
+## Holt-Winters Models: Exponential Smoothing
+
+```{r, fig.width=5, fig.height=5}
+# Fit
+volcanodust.hw <- HoltWinters(volcanodust, beta=FALSE, gamma=FALSE)
+volcanodust.hw
+plot(volcanodust.hw)
+
+# Forecast using Holt-Winters Smoothing
+volcanodust.forecasts.hw <- forecast:::forecast.HoltWinters(volcanodust.hw, h=100)
+
+# Plot forecasts
+forecast:::plot.forecast(volcanodust.forecasts.hw)
+
+# Plot residuals
+na.omit(volcanodust.forecasts.hw$residuals) %>% ggtsdisplay(lag.max=20, main='Residual', theme=theme_bw())
+
+# Run Ljung-Box test (null hypothesis: there is no non-zero autocorrelation in the in-sample forecast errors)
+Box.test(volcanodust.forecasts.hw$residuals, lag=20, type="Ljung-Box")
+
+# Plot histogram of residuals
+ggplot() + aes(as.numeric(na.omit(volcanodust.forecasts.hw$residuals))) + geom_histogram(aes(y=..density..), bins=30, alpha=0.75, color='blue', fill='blue') + geom_density()
+
+# Plot quantile-quantile plot
+qqplot.data(as.numeric(na.omit(volcanodust.forecasts.hw$residuals)))
+```
+
+## ARIMA / SARIMA Models
+
+```{r, fig.width=5, fig.height=5}
+# AIC: ARIMA(1,0,2)
+# BIC: ARIMA(2,0,0)
+volcanodust.arima <- auto.arima(volcanodust, max.p=10, max.q=10, stationary=TRUE, seasonal=FALSE, ic="bic", stepwise=FALSE)
+volcanodust.arima
+
+volcanodust.fit.arima <- arima(volcanodust, order=c(2,0,0))
+volcanodust.forecasts.arima <- volcanodust %>% forecast(h=100) %>% autoplot()
+volcanodust.forecasts.arima
+
+checkresiduals(volcanodust.fit.arima)
+```
+
+
+1. Confidence interval for the time series are given by: mu+-1.96*root(var(mu)), where mu is the sample estimate of the mean and var(mu) is given by autocorrelation coefficients up to 10log10(n) terms
+2. Kalman filter, Particle filter
+3. Garch
